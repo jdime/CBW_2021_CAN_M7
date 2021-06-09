@@ -13,8 +13,8 @@ Package versions are provided in the Git pages: https://jdime.github.io/CBW_2021
 
 For this module, we use seven glioblastoma scRNA-seq samples from [Richards et al 2021 (Nature Cancer), authors Figure 7](https://www.nature.com/articles/s43018-020-00154-9) as an example.
 
-Raw scRNA-seq measurements are provided in MTX format, metadata, and code needed for this tutorial can be obtained from Zenodo:
-https://zenodo.org/record/4913828#.YMAr3TZKjUI
+Raw scRNA-seq measurements are provided in MTX format, metadata, relevant intermediate outfiles, and code needed for this tutorial can be obtained from Zenodo:
+https://zenodo.org/record/4918244#.YMEL9zZKjUI
 
 ### How to run scripts
 
