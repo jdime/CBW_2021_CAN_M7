@@ -1,6 +1,6 @@
 --- 
-title: "YOUR TITLE HERE"
-author: "YOUR NAME HERE"
+title: "CBW_2021_CAN_M7 Single Cell RNA"
+author: "J. Javier Diaz-Mejia"
 date: "`r Sys.Date()`"
 site: bookdown::bookdown_site
 ---

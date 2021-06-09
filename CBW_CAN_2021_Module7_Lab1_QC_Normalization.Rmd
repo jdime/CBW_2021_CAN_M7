@@ -1,0 +1,253 @@
+---
+title: "CBW_CAN_2021_Module7_Lab1_QC_Normalization"
+output: html_notebook
+---
+
+* Javier Diaz - javier.diazmejia@gmail.com
+* Script based on: https://satijalab.org/seurat/articles/integration_introduction.html
+
+* GENERAL OVERVIEW OF THIS SCRIPT
+  1) Loads scRNA-seq data from Cell Ranger (MTX files)
+  2) Generates QC plots for each dataset
+  3) Normalizes each dataset
+  4) Saves R objects with each normalized dataset
+
+***
+
+### DEFINE ENVIRONMENT, INPUTS AND OUTDIR
+```{r}
+oldw <- getOption("warn")
+options( warn = -1 )
+```
+
+###### Required libraries
+```{r}
+library(Seurat)   # (CRAN) main scRNA-seq analysis package
+```
+
+###### User's home and stopwatch to time run
+```{r}
+UserHomeDirectory <- Sys.getenv("HOME")[[1]]
+print(UserHomeDirectory)
+
+StopWatchStart <- list()
+StopWatchEnd   <- list()
+
+StopWatchStart$Overall  <- Sys.time()
+```
+
+###### Define inputs
+```{r}
+### Select glioblastoma datasets from Richards_NatCancer_2021
+DatasetIds <- list( ## List of input IDs to process
+  `1` = "G1003_A_T",
+  `2` = "G620_T",
+  `3` = "G910_A_T",
+  `4` = "G945_I_T",
+  `5` = "G946_I_T",
+  `6` = "G967_A_T",
+  `7` = "G983_A_T"
+)
+
+### /path_to/MTX_DIRECTORIES from 10X Cell Ranger (i.e. 'filtered_feature_bc_matrix' directories
+### with [features.tsv.gz, barcodes.tsv.gz and matrix.mtx.gz] files)
+PathToDatasets <- list(
+  "G1003_A_T" = "~/CourseData/CAN_data/Module7/MTX_FILES/Richards_NatCancer_2021/G1003_A_T/",
+  "G620_T"    = "~/CourseData/CAN_data/Module7/MTX_FILES/Richards_NatCancer_2021/G620_T/",
+  "G910_A_T"  = "~/CourseData/CAN_data/Module7/MTX_FILES/Richards_NatCancer_2021/G910_A_T/",
+  "G945_I_T"  = "~/CourseData/CAN_data/Module7/MTX_FILES/Richards_NatCancer_2021/G945_I_T/",
+  "G946_I_T"  = "~/CourseData/CAN_data/Module7/MTX_FILES/Richards_NatCancer_2021/G946_I_T/",
+  "G967_A_T"  = "~/CourseData/CAN_data/Module7/MTX_FILES/Richards_NatCancer_2021/G967_A_T/",
+  "G983_A_T"  = "~/CourseData/CAN_data/Module7/MTX_FILES/Richards_NatCancer_2021/G983_A_T/"
+)
+```
+
+###### Define outputs
+```{r}
+### Outputs
+PathForOutfiles <- "~/CourseData/CAN_data/Module7/OUTFILES/Richards_NatCancer_2021" ## /path_to/out_directory
+PrefixOutfiles  <- "Richards_NatCancer_2021"  ## Prefix for outfiles
+PathForOutfiles <- gsub("^~/",paste0(UserHomeDirectory,"/"), PathForOutfiles)
+dir.create(path = PathForOutfiles, recursive = T, showWarnings = F)
+```
+
+###### Define default parameters
+```{r}
+DefaultParameters <- list(
+  
+  ### Parameters for QC plots
+  CellPropertiesToQC = c("nFeature_RNA", "nCount_RNA", "mito.fraction"),
+  
+  ### Parameters for Seurat filters
+  MinCells = 1,
+  MinGenes = 50,
+  MaxReads = 80000,
+  MaxMitoFraction = 0.2
+)
+```
+
+###### Report R sessionInfo
+```{r}
+OutfileRSessionInfo<-paste0(PathForOutfiles, "/", PrefixOutfiles, "_SingleCell_1_QC_Normalization_RSessionInfo.txt")
+writeLines(capture.output(sessionInfo()), OutfileRSessionInfo)
+capture.output(sessionInfo())
+```
+
+### LOAD DATASETS
+```{r}
+####################################
+###Load datasets from local (MTX files produced by Cell Ranger) and create Seurat objects
+####################################
+
+SeuratObjectsUnfiltered <-list()
+
+for (datasetNumber in c(1:length(DatasetIds))) {
+  dataset <- DatasetIds[[as.character(datasetNumber)]]
+  DatasetPath <- PathToDatasets[[dataset]]
+  DatasetPath<-gsub("^~/",paste0(UserHomeDirectory,"/"), DatasetPath)
+  print(paste("Loading:", datasetNumber, dataset, DatasetPath, sep = " "))
+  
+  ### Create sparse matrix
+  expression_matrix.mat <- Read10X(data.dir = DatasetPath, strip.suffix = T)
+  colnames(expression_matrix.mat) <- paste(dataset, colnames(expression_matrix.mat), sep = "_") ### Add datasetID to cell-barcode
+  dim(expression_matrix.mat)
+  
+  ### Create Seurat object
+  seurat.object.u <- CreateSeuratObject(counts = expression_matrix.mat,
+                                        min.cells = DefaultParameters$MinCells, 
+                                        min.features = DefaultParameters$MinGenes, 
+                                        project = paste0(PrefixOutfiles, "_", dataset)
+                                        )
+  seurat.object.u[['dataset.label']] <- dataset
+  SeuratObjectsUnfiltered[[datasetNumber]]  <- seurat.object.u
+}
+print(SeuratObjectsUnfiltered)
+```
+
+### QC DATASETS
+```{r}
+####################################
+###Filter cells based on number of genes, number of reads, and mitochondrial representation
+####################################
+SeuratObjectsFiltered <-list()
+
+for (datasetNumber in c(1:length(DatasetIds))) {
+  dataset <- DatasetIds[[as.character(datasetNumber)]]
+  DatasetPath <- PathToDatasets[[dataset]]
+  seurat.object.u <- SeuratObjectsUnfiltered[[datasetNumber]]
+  print(paste("Filtering:", datasetNumber, dataset, DatasetPath, sep = " "))
+  
+  mitoRegExpressions <- paste(c("^MT-"), collapse = "|")
+  mito.features <- grep(pattern = mitoRegExpressions, 
+                        ignore.case = T, x = rownames(x = SeuratObjectsUnfiltered[[datasetNumber]]), value = T)
+
+  ####################################
+  ### Get mitochondrial genes
+  ####################################
+  if (length(mito.features)[[1]] > 0) {
+    mito.fraction <- Matrix::colSums(x = GetAssayData(object = seurat.object.u, slot = 'counts')[mito.features, ]) / Matrix::colSums(x = GetAssayData(object = seurat.object.u, slot = 'counts'))
+    seurat.object.u[['mito.fraction']] <- mito.fraction
+  }else{
+    mito.fraction <- 0 / Matrix::colSums(x = GetAssayData(object = seurat.object.u, slot = 'counts'))
+    seurat.object.u[['mito.fraction']] <- mito.fraction
+  }
+  
+  ####################################
+  ### Generate violin plots
+  ####################################
+  VlnPlotPdf<-paste0(PathForOutfiles, "/", PrefixOutfiles, "_QC_ViolinPlots_", dataset, ".pdf")
+  pdf(file=VlnPlotPdf, width = 10, height = 5)
+  print(VlnPlot(seurat.object.u, features = c("nFeature_RNA", "nCount_RNA", "mito.fraction"), ncol = 3))
+  dev.off()
+  print(VlnPlot(seurat.object.u, features = c("nFeature_RNA", "nCount_RNA", "mito.fraction"), ncol = 3))
+
+  ####################################
+  ### Filter cells based gene counts, number of reads, ribosomal and mitochondrial representation
+  ####################################
+  if (length(mito.features)[[1]] > 0) {
+    seurat.object.f<-subset(x = seurat.object.u, subset = 
+                              nFeature_RNA  >= DefaultParameters$MinGenes
+                            & nCount_RNA    <= DefaultParameters$MaxReads
+                            & mito.fraction <= DefaultParameters$MaxMitoFraction)
+    
+  }else{
+    seurat.object.f<-subset(x = seurat.object.u, subset = 
+                              nFeature_RNA  >= DefaultParameters$MinGenes
+                            & nCount_RNA    <= DefaultParameters$MaxReads)
+  }
+  
+  SeuratObjectsFiltered[[datasetNumber]]  <- seurat.object.f
+
+}
+
+####################################
+### Merge Seurat objects RNA assay
+####################################
+FirstSeuratObject   <- SeuratObjectsFiltered[[1]]
+RestOfSeuratObjectsFiltered <- SeuratObjectsFiltered[c(2:length(DatasetIds))]
+RestOfDatasetsIds    <- unlist(DatasetIds[c(2:length(DatasetIds))])
+
+seurat.object.merged <- merge(FirstSeuratObject, y = RestOfSeuratObjectsFiltered, project = PrefixOutfiles)
+seurat.object.merged <- AddMetaData(object = seurat.object.merged, metadata = seurat.object.merged@meta.data$dataset.label, col.name = "dataset")
+seurat.object.list <- SplitObject(seurat.object.merged, split.by = "dataset.label")
+
+print(seurat.object.list)
+```
+
+### NORMALIZE DATASETS
+```{r, warning = F, message = T}
+####################################
+### Running SCTransform
+####################################
+for (i in 1:length(seurat.object.list)) {
+  dataset <- names(seurat.object.list)[[i]]
+  print(paste("Normalizing:", i, dataset, sep = " "))
+  seurat.object.list[[i]] <- SCTransform(seurat.object.list[[i]], verbose = F)
+}
+```
+
+### SAVE EACH DATASET R_OBJECT
+```{r}
+####################################
+### Saving each dataset R object
+####################################
+for (i in 1:length(seurat.object.list)) {
+  dataset <- names(seurat.object.list)[[i]]
+  print(paste("Saving:", i, dataset, sep = " "))
+  OutfileRDS<-paste0(PathForOutfiles, "/", PrefixOutfiles, "_", dataset , "_QC_Normalization.rds")
+  saveRDS(seurat.object.list[[i]], file = OutfileRDS)
+}
+```
+
+### OBTAIN COMPUTING TIME
+```{r}
+####################################
+### Obtain computing time used
+####################################
+StopWatchEnd$Overall  <- Sys.time()
+
+OutfileCPUtimes<-paste0(PathForOutfiles, "/", PrefixOutfiles, "_QC_Normalization.txt")
+
+Headers<-paste("Step", "Time(minutes)", sep="\t")
+write.table(Headers, file = OutfileCPUtimes, row.names = F, col.names = F, sep="\t", quote = F, append = T)
+
+lapply(names(StopWatchStart), function(stepToClock) {
+  if (regexpr("POSIXct", class(StopWatchStart[[stepToClock]]), ignore.case = T)[1] == 1) {
+    TimeStart <- StopWatchStart[[stepToClock]]
+    TimeEnd   <- StopWatchEnd[[stepToClock]]
+    TimeDiff <- format(difftime(TimeEnd, TimeStart, units = "min"))
+    ReportTime<-c(paste(stepToClock, TimeDiff, sep = "\t", collapse = ""))
+    write(file = OutfileCPUtimes, x=gsub(pattern = " mins", replacement = "", x = ReportTime), append = T)
+  }
+})
+```
+
+### FINISH
+```{r}
+####################################
+### Finish
+####################################
+options(warn = oldw)
+writeLines(paste0("\nEND - Check:\n", PathForOutfiles, "\nFor outfiles\n\n"))
+# quit()
+```

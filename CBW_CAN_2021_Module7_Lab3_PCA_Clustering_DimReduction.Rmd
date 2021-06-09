@@ -1,0 +1,453 @@
+---
+title: "CBW_CAN_2021_Module7_Lab3_PCA_Clustering_DimReduction"
+output: html_notebook
+---
+
+* Javier Diaz - javier.diazmejia@gmail.com
+* Script based on: https://satijalab.org/seurat/articles/integration_introduction.html
+
+* GENERAL OVERVIEW OF THIS SCRIPT
+  1) Loads integrated datasets R object produced by script CBW_CAN_2021_Module7_Lab2_Integration.R
+  2) Process integrated datasets as a whole, including:
+    - dimension reduction
+    - 'global' cell clustering
+    - UMAP plots by global cell clusters, sample, requested genes and metadata
+    - Violin plots
+    - Dot plots
+  3) Saves R object with PCA, clustering and dimension reduction
+
+***
+
+### DEFINE ENVIRONMENT, INPUTS AND OUTDIR
+```{r}
+oldw <- getOption("warn")
+options( warn = -1 )
+```
+
+###### Required libraries
+```{r}
+library(Seurat)  # (CRAN) main scRNA-seq analysis package
+library(future)  # (CRAN) to run parallel processes
+library(ggplot2) # (CRAN) to generate enhanced plots
+library(DropletUtils) # (Bioconductor) to write out MTX format files
+```
+
+###### User's home and stopwatch to time run
+```{r}
+UserHomeDirectory <- Sys.getenv("HOME")[[1]]
+print(UserHomeDirectory)
+
+StopWatchStart <- list()
+StopWatchEnd   <- list()
+
+StopWatchStart$Overall  <- Sys.time()
+```
+
+###### Define inputs
+```{r}
+### Run specific inputs and parameters
+
+AnchorFinder        <- "STACAS" ## Either 'STACAS' or 'SEURAT'
+PathToIntegratedRds <- paste0("~/CourseData/CAN_data/Module7/OUTFILES/Richards_NatCancer_2021/", AnchorFinder, "/WITHOUT_G945_I_T", "/Richards_NatCancer_2021_Integration.rds") ### /path_to/*rds (R object) from CBW_CAN_2021_Module7_Lab2_Integration.R
+InfileMetadata      <- "~/CourseData/CAN_data/Module7/METADATA/Richards_NatCancer_2021_without_G945_I_T.metadata.tsv"
+MetedataPropsToPlot <- c("cell_cluster.cell_type", "cell_type")
+PathToIntegratedRds <- gsub("^~/",paste0(UserHomeDirectory,"/"), PathToIntegratedRds)
+SelectedGenes       <- c("PTPRC", "MOG", "MAG", "EGFR", "CD3D", "CD2", "ITGAM", "FCGR3A", "CD14", "TMEM119")
+ASSAY               <- "SCT"
+NumberOfDimensions  <- 20
+ClustersForDotPlot2 <- c(0,1,4,8,10)
+DimRedMethodPlots   <- "umap"
+SampleForInferCNV   <- "G983_A_T" ## Filtered counts and cell cluster identities from this sample will be used for CBW_CAN_SingleCell_Lab6_InferCNV.R
+```
+
+###### Define outputs
+```{r}
+### Outputs
+PathForOutfiles     <- paste0("~/CourseData/CAN_data/Module7/OUTFILES/Richards_NatCancer_2021/", AnchorFinder, "/WITHOUT_G945_I_T") ## /path_to/out_directory
+PrefixOutfiles      <- "Richards_NatCancer_2021"  ## Prefix for outfiles
+PathForOutfiles     <- gsub("^~/",paste0(UserHomeDirectory,"/"), PathForOutfiles)
+dir.create(path = PathForOutfiles, recursive = T, showWarnings = F)
+```
+
+###### Define default parameters
+```{r}
+### Default parameters. Either suggested by Seurat developers, or tailored empirically.
+DefaultParameters <- list(
+  
+  ### Parameters for QC plots
+  CellPropertiesToQC = c("nFeature_RNA", "nCount_RNA", "mito.fraction"),
+  
+  ### Parameters for clustering
+  Resolution = 0.5,
+
+  ### Parameters for datasets comparison
+  AssaysForAverageGETables = c("RNA", "SCT"),
+  
+  ### Parameters for t-SNE plots
+  MinNumberOfCellsToReducePerplexity = 150,
+  ReducedPerplexity = 7
+)
+
+### Dimension reduction methods
+DimensionReductionMethods<-list()
+DimensionReductionMethods$umap$name <-"UMAP"
+DimensionReductionMethods$tsne$name <-"TSNE"
+DimensionReductionMethods$umap$run  <-as.function(RunUMAP)
+DimensionReductionMethods$tsne$run  <-as.function(RunTSNE)
+```
+
+###### Report R sessionInfo
+```{r}
+OutfileRSessionInfo<-paste0(PathForOutfiles, "/", PrefixOutfiles, "_SingleCell_3_PCA_Clustering_DimReduction_RSessionInfo.txt")
+writeLines(capture.output(sessionInfo()), OutfileRSessionInfo)
+capture.output(sessionInfo())
+```
+
+###### Define number of cores and RAM for parallelization
+```{r}
+NumbCores <- "MAX"
+MaxGlobalVariables <- 10000
+
+if (regexpr("^MAX$", NumbCores, ignore.case = T)[1] == 1) {
+  NumbCoresToUse <- availableCores()[[1]]
+}else if (regexpr("^[0-9]+$", NumbCores, ignore.case = T)[1] == 1) {
+  NumbCoresToUse <- as.numeric(NumbCores)
+}else{
+  stop(paste0("Unexpected format for NumbCores: ", NumbCores, "\n"))
+}
+
+if (NumbCoresToUse == 1) {
+  plan(strategy = "sequential")
+  writeLines(paste0("\n", "*** Running: in 'sequential' mode with ", NumbCoresToUse, " core ***", "\n"))
+}else if (NumbCoresToUse > 1) {
+  plan(strategy = "multicore", workers = NumbCoresToUse)
+  writeLines(paste0("\n", "*** Running: in 'multicore' mode with ", NumbCoresToUse, " cores ***", "\n"))
+}else{
+  stop(paste0("Unexpected NumbCores = ", NumbCoresToUse))
+}
+
+options(future.globals.maxSize = MaxGlobalVariables * 1024^2)
+```
+
+### LOAD R OBJECT
+```{r}
+####################################
+### Load R Object
+####################################
+seurat.object.integrated <- readRDS(PathToIntegratedRds)
+```
+
+### REDUCE DIMENSIONS
+```{r, warning = F, message = T}
+####################################
+### Obtaining principal components
+####################################
+seurat.object.integrated <- RunPCA(seurat.object.integrated, verbose = F)
+
+####################################
+### Generate Elbow plot
+####################################
+seurat.object.integrated@active.assay <- ASSAY
+
+ForElbowPlot<-ElbowPlot(object = seurat.object.integrated, ndims = 50, reduction = "pca")
+MaxYAxis<-as.integer(max(ForElbowPlot$data$stdev)+1)
+
+OutfilePCElbowPlot <- paste0(PathForOutfiles, "/",  PrefixOutfiles, "_PCElbowPlot", ".pdf")
+pdf(file=OutfilePCElbowPlot, width = 7, height = 7)
+print(ForElbowPlot
+      + scale_x_continuous(breaks =  seq(from = 0, to = 50, by=5))
+      + geom_vline(xintercept = seq(from = 0, to = 50, by=5), linetype='dotted', col="red")
+      + scale_y_continuous(breaks =  seq(from = 0, to = MaxYAxis, by=0.5))
+      + geom_hline(yintercept = seq(from = 0, to = MaxYAxis, by=0.5), linetype='dotted', col="red")
+)
+dev.off()
+
+print(ForElbowPlot
+      + scale_x_continuous(breaks =  seq(from = 0, to = 50, by=5))
+      + geom_vline(xintercept = seq(from = 0, to = 50, by=5), linetype='dotted', col="red")
+      + scale_y_continuous(breaks =  seq(from = 0, to = MaxYAxis, by=0.5))
+      + geom_hline(yintercept = seq(from = 0, to = MaxYAxis, by=0.5), linetype='dotted', col="red")
+)
+```
+
+```{r}
+####################################
+### Run dimension reductions using integrated data
+####################################
+writeLines("\n*** Run dimension reductions using integrated data ***\n")
+
+PcaDimsUse <- c(1:NumberOfDimensions)
+
+for (dim_red_method in names(DimensionReductionMethods)) {
+  ####################################
+  ### Run non-linear dimension reductions using integrated data
+  ####################################
+  ### NOTES:
+  ### In RunTSNE: if the number of cells is too small, user may get error:
+  ### `Error in Rtsne.default(X = as.matrix(x = data.use), dims = dim.embed,  : Perplexity is too large.`
+  ### User can try tunning down the default RunTSNE(..., perplexity=30) to say 5 or 10
+  ###
+  ### Also using RunTSNE(..., check_duplicates = F) to skip cases where cells happen to have the same values after PCA reduction
+  
+  if (("tsne" %in% dim_red_method == T) & (length(colnames(seurat.object.integrated)) < DefaultParameters$MinNumberOfCellsToReducePerplexity)) {
+    writeLines(paste0("\n*** Using reduced perplexity = ", DefaultParameters$ReducedPerplexity, " because found ",  length(colnames(seurat.object.integrated)), " cells", " ***\n"))
+    seurat.object.integrated <- DimensionReductionMethods[[dim_red_method]][["run"]](object = seurat.object.integrated, dims = PcaDimsUse, perplexity = DefaultParameters$ReducedPerplexity, check_duplicates = F)
+  }else if ("tsne" %in% dim_red_method == T) {
+    seurat.object.integrated <- DimensionReductionMethods[[dim_red_method]][["run"]](object = seurat.object.integrated, dims = PcaDimsUse, check_duplicates = F)
+  }else if ("umap" %in% dim_red_method == T) {
+    seurat.object.integrated <- DimensionReductionMethods[[dim_red_method]][["run"]](object = seurat.object.integrated, dims = PcaDimsUse, umap.method = "uwot")
+  }
+  
+  ###################################
+  ### Write out dimension reduction coordinates
+  ####################################
+  Outfile.con <- bzfile(paste0(PathForOutfiles, "/", PrefixOutfiles, "_", DimensionReductionMethods[[dim_red_method]][["name"]], "Plot_Coordinates", ".tsv.bz2"), "w")
+  Headers<-paste("Barcode",paste(colnames(seurat.object.integrated@reductions[[dim_red_method]]@cell.embeddings), sep="", collapse="\t"), sep="\t", collapse = "\t")
+  write.table(Headers, file = Outfile.con, row.names = F, col.names = F, sep="\t", quote = F)
+  write.table(seurat.object.integrated@reductions[[dim_red_method]]@cell.embeddings, file = Outfile.con,  row.names = T, col.names = F, sep="\t", quote = F, append = T)
+  close(Outfile.con)
+}
+```
+
+### CLUSTER CELLS
+```{r, warning = F, message = T}
+####################################
+### Globally cluster cells using integrated data
+####################################
+writeLines("\n*** Globally cluster cells using integrated data ***\n")
+
+options(scipen=10) ## Needed to avoid an 'Error in file(file, "rt") : cannot open the connection'
+seurat.object.integrated <- FindNeighbors(object = seurat.object.integrated, dims = PcaDimsUse)
+seurat.object.integrated <- FindClusters(object = seurat.object.integrated, resolution = DefaultParameters$Resolution, graph.name = "integrated_snn")
+
+####################################
+### Write out cell-cluster identities
+####################################
+CellBarcodes <- rownames(seurat.object.integrated@meta.data)
+CellClusters <- seurat.object.integrated@meta.data$seurat_clusters
+Headers<-paste("Cell_barcode", paste0("seurat_cluster_r", DefaultParameters$Resolution), sep="\t")
+clusters_data<-paste(CellBarcodes, CellClusters, sep="\t")
+Outfile.con <- bzfile(paste0(PathForOutfiles, "/", PrefixOutfiles, "_GlobalClustering_CellClusters.tsv.bz2"), "w")
+write.table(Headers, file = Outfile.con, row.names = F, col.names = F, sep="\t", quote = F)
+write.table(data.frame(clusters_data), file = Outfile.con, row.names = F, col.names = F, sep="\t", quote = F, append = T)
+close(Outfile.con)
+
+####################################
+### Write out number of cells per cluster
+####################################
+Outfile.con <- bzfile(paste0(PathForOutfiles, "/", PrefixOutfiles, "_GlobalClustering_NumbCellsPerCluster.tsv.bz2"), "w")
+Headers<-paste("Cluster", "Number_of_cells", sep="\t", collapse = "")
+write.table(Headers, file = Outfile.con, row.names = F, col.names = F, sep="\t", quote = F)
+write.table(table(CellClusters), file = Outfile.con, row.names = F, col.names = F, sep="\t", quote = F, append = T)
+close(Outfile.con)
+
+####################################
+### Print out the integrated matrices and cell cluster identities for CBW_CAN_SingleCell_Lab6_InferCNV.R
+####################################
+Idents(seurat.object.integrated) <- "dataset"
+### Subset sample
+seurat.object.integrated.subset <- subset(x = seurat.object.integrated, idents = SampleForInferCNV)
+print(seurat.object.integrated.subset)
+
+ASSAY <- "SCT"
+### Write out count matrices in MTX format  
+OutdirMTX <- paste0("~/CourseData/CAN_data/Module7/OUTFILES/Richards_NatCancer_2021/", AnchorFinder, "/WITHOUT_G945_I_T",
+                    "/INTEGRATED_MATRIX_", SampleForInferCNV, "/", ASSAY, "/MTX")
+dir.create(file.path(OutdirMTX), showWarnings = F, recursive = T)
+write10xCounts(path = OutdirMTX, x = seurat.object.integrated.subset@assays[[ASSAY]]@counts, gene.type="Gene Expression", overwrite=T, type="sparse", version="3")
+
+### Write out cell-cluster identities
+CellBarcodes <- rownames(seurat.object.integrated.subset@meta.data)
+CellClusters <- seurat.object.integrated.subset@meta.data$seurat_clusters
+clusters_data<-paste(CellBarcodes, CellClusters, sep="\t")
+Outfile.con <- bzfile(paste0(PathForOutfiles, "/", PrefixOutfiles, "_GlobalClustering_CellClusters_", SampleForInferCNV, ".tsv.bz2"), "w")
+write.table(data.frame(clusters_data), file = Outfile.con, row.names = F, col.names = F, sep="\t", quote = F, append = T)
+close(Outfile.con)
+```
+
+### GENERATE UMAP PLOTS
+```{r, warning=F}
+####################################
+### Colour dimension reduction plots by global cell-clusters
+####################################
+plots <- DimPlot(seurat.object.integrated, group.by = c("seurat_clusters"), combine = F, reduction = DimRedMethodPlots, label = T, label.size = 10)
+plots <- lapply(X = plots, FUN = function(x) x + theme(legend.position = "right") + guides(color = guide_legend(override.aes = list(size = 3))))
+
+OutfilePdf<-paste0(PathForOutfiles, "/", PrefixOutfiles, "_", DimensionReductionMethods[[DimRedMethodPlots]][["name"]], "Plot_GlobalClustering_ColourByCellClusters", ".pdf")
+pdf(file=OutfilePdf, width = 8, height = 7)
+print(plots)
+dev.off()
+print(plots)
+```
+
+```{r, warning=F}
+####################################
+### Colour dimension reduction plots by dataset
+####################################
+plots <- DimPlot(seurat.object.integrated, group.by = c("dataset"), combine = F, reduction = DimRedMethodPlots)
+plots <- lapply(X = plots, FUN = function(x) x + theme(legend.position = "top") + guides(color = guide_legend(ncol = 6, override.aes = list(size = 3))))
+
+OutfilePdf<-paste0(PathForOutfiles, "/", PrefixOutfiles, "_", DimensionReductionMethods[[DimRedMethodPlots]][["name"]], "Plot_GlobalClustering_ColourByDataset", ".pdf")
+pdf(file=OutfilePdf, width = 7, height = 8)
+print(plots)
+dev.off()
+print(plots)
+```
+
+```{r, fig.height = 7, fig.width = 10, warning=F}
+
+####################################
+### Colour dimension reduction plots for all cells by selected genes
+####################################
+seurat.object.integrated@active.assay <- "SCT"
+plots <- FeaturePlot(object = seurat.object.integrated, features = SelectedGenes, cols = c("lightgrey", "blue"),
+                     reduction = DimRedMethodPlots, order = T, slot = "data", pt.size = 0.3, min.cutoff = "q0.1", max.cutoff = "q90",
+                     ncol = 3)
+
+OutfilePdf<-paste0(PathForOutfiles, "/", PrefixOutfiles, "_", DimensionReductionMethods[[DimRedMethodPlots]][["name"]], "Plot_AllCells_ColourBySelectedGenes", ".pdf")
+pdf(file=OutfilePdf, width=8, height=8)
+print(plots)
+dev.off()
+print(plots)
+```
+
+```{r, warning=F}
+####################################
+### Colour dimension reduction plots using cell-level metadata
+####################################
+### Load Metadata
+CellPropertiesFromMetadata <- data.frame(read.table(InfileMetadata, header = T, row.names = 1, check.names = F))
+head(CellPropertiesFromMetadata)
+
+### Add Metadata to Seurat object
+head(seurat.object.integrated@meta.data)
+seurat.object.integrated <- AddMetaData(object = seurat.object.integrated, metadata = CellPropertiesFromMetadata)
+
+for (property in MetedataPropsToPlot) {
+  plots <- DimPlot(seurat.object.integrated, group.by = property, combine = F, reduction = DimRedMethodPlots, label = T)
+  plots <- lapply(X = plots, FUN = function(x) x + theme(legend.position = "top", legend.text.align = 0) + labs(title = property) +
+                    guides(color = guide_legend(ncol = 5, override.aes = list(size = 3))))
+
+  OutfilePdf <- paste0(PathForOutfiles, "/", PrefixOutfiles, "_", DimensionReductionMethods[[DimRedMethodPlots]][["name"]], "Plot_Metadata_", property, ".pdf")
+  pdf(file=OutfilePdf, width = 7, height = 7)
+  print(plots)
+  dev.off()
+  print(plots)
+}
+```
+
+```{r, warning=F}
+####################################
+### Colour dimension reduction plots by global cell-clusters, subsetting each dataset
+####################################
+for (datasetID in unique(seurat.object.integrated@meta.data$dataset)) {
+  Idents(seurat.object.integrated) <- "dataset"
+  seurat.object.integrated.subset <- subset(x = seurat.object.integrated, idents = datasetID)
+
+  plots <- DimPlot(seurat.object.integrated.subset, group.by = "seurat_clusters", combine = F, reduction = DimRedMethodPlots, label = T)
+  plots <- lapply(X = plots, FUN = function(x) x + theme(legend.position = "top", legend.text.align = 0)
+                  + labs(title = paste0("seurat_clusters - ", datasetID))
+                  + guides(color = guide_legend(ncol = 7, override.aes = list(size = 3))))
+
+  OutfilePdf<-paste0(PathForOutfiles, "/", PrefixOutfiles, "_", DimensionReductionMethods[[DimRedMethodPlots]][["name"]], "Plot_", datasetID, "_GlobalClustering_ColourByCellClusters.pdf")
+  pdf(file=OutfilePdf, width = 7, height = 7)
+  print(plots)
+  dev.off()
+  print(plots)
+}
+```
+
+### GENERATE DOT PLOTS
+```{r, warning=F}
+####################################
+### Dot plots: genes (x-axis) cell-properties (y-axis), all cells
+####################################
+Idents(seurat.object.integrated) <- "seurat_clusters"
+plots <- DotPlot(seurat.object.integrated, features = SelectedGenes, assay = ASSAY, cluster.idents = T)
+plots <- plots + RotatedAxis()
+
+OutfilePdf<-paste0(PathForOutfiles, "/", PrefixOutfiles, "_", "DotPlots_AllCells_SelectedGenes.pdf")
+pdf(file=OutfilePdf, width = 7, height = 7)
+print(plots)
+dev.off()
+print(plots)
+```
+
+```{r, fig.height = 5, fig.width = 10, warning=F}
+####################################
+### Dot plots: genes (x-axis) cell-properties (y-axis), each dataset cells
+####################################
+Idents(seurat.object.integrated) <- "seurat_clusters"
+plots <- DotPlot(seurat.object.integrated, features = SelectedGenes, idents = ClustersForDotPlot2,
+                 cols = c("cornflowerblue", "darkolivegreen4", "chocolate1", "aquamarine3", "burlywood3", 
+                          "azure4", "brown1"), dot.scale = 4, split.by = "dataset")
+plots <- plots + RotatedAxis()
+
+
+OutfilePdf<-paste0(PathForOutfiles, "/", PrefixOutfiles, "_", "DotPlots_EachDatasetCells", ".pdf")
+pdf(file=OutfilePdf, width = 7, height = 9)
+print(plots)
+dev.off()
+print(plots)
+```
+
+### GET AVERAGE GENE EXPRESSION PER CLUSTER
+```{r}
+####################################
+### Get average gene expression for each global cluster
+####################################
+Idents(object = seurat.object.integrated) <- "seurat_clusters"
+
+cluster.averages <- AverageExpression(object = seurat.object.integrated, use.scale = F, use.counts = F, assays = ASSAY)
+
+Outfile.con <- bzfile(paste0(PathForOutfiles, "/", PrefixOutfiles, "_AverageGeneExpression_GlobalClustering.tsv.bz2"), "w")
+Headers<-paste("AVERAGE_GENE_EXPRESSION", paste("c", colnames(cluster.averages[[ASSAY]]), sep="", collapse="\t"), sep="\t", collapse = "\t")
+write.table(Headers, file = Outfile.con, row.names = F, col.names = F, sep="\t", quote = F)
+write.table(data.frame(cluster.averages[[ASSAY]]), file = Outfile.con, row.names = T, col.names = F, sep="\t", quote = F, append = T)
+close(Outfile.con)
+```
+
+### SAVE INTEGRATED R_OBJECT
+```{r}
+####################################
+### Saving integrated R object
+####################################
+OutfileRDS<-paste0(PathForOutfiles, "/", PrefixOutfiles, "_PCA_Clustering_DimReduction.rds")
+saveRDS(seurat.object.integrated, file = OutfileRDS)
+```
+
+### OBTAIN COMPUTING TIME
+```{r}
+####################################
+### Obtain computing time used
+####################################
+StopWatchEnd$Overall  <- Sys.time()
+
+OutfileCPUtimes<-paste0(PathForOutfiles, "/", PrefixOutfiles, "_PCA_Clustering_DimReduction_CPUtimes.txt")
+
+write(file = OutfileCPUtimes, x = paste("#Number_of_cores_used", NumbCoresToUse, sep = "\t", collapse = ""))
+write(file = OutfileCPUtimes, x = paste("#MaxGlobalVariables", MaxGlobalVariables, sep = "\t", collapse = ""), append = T)
+
+Headers<-paste("Step", "Time(minutes)", sep="\t")
+write.table(Headers, file = OutfileCPUtimes, row.names = F, col.names = F, sep="\t", quote = F, append = T)
+
+lapply(names(StopWatchStart), function(stepToClock) {
+  if (regexpr("POSIXct", class(StopWatchStart[[stepToClock]]), ignore.case = T)[1] == 1) {
+    TimeStart <- StopWatchStart[[stepToClock]]
+    TimeEnd   <- StopWatchEnd[[stepToClock]]
+    TimeDiff <- format(difftime(TimeEnd, TimeStart, units = "min"))
+    ReportTime<-c(paste(stepToClock, TimeDiff, sep = "\t", collapse = ""))
+    write(file = OutfileCPUtimes, x=gsub(pattern = " mins", replacement = "", x = ReportTime), append = T)
+  }
+})
+```
+
+### FINISH
+```{r}
+####################################
+### Finish
+####################################
+options(warn = oldw)
+writeLines(paste0("\nEND - Check:\n", PathForOutfiles, "\nFor outfiles\n\n"))
+# quit()
+```

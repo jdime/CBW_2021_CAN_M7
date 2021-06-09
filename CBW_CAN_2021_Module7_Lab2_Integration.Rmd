@@ -1,0 +1,271 @@
+---
+title: "CBW_CAN_2021_Module7_Lab2_Integration"
+output: html_notebook
+---
+
+* Javier Diaz - javier.diazmejia@gmail.com
+* Script based on: https://satijalab.org/seurat/articles/integration_introduction.html
+
+* GENERAL OVERVIEW OF THIS SCRIPT
+  1) Loads each normalized dataset R object produced by script CBW_CAN_2021_Module7_Lab1_QC_Normalization.R
+  2) Merges and integrates datasets correcting batch effects
+  3) Saves R object with integrated datasets
+
+***
+
+### DEFINE ENVIRONMENT, INPUTS AND OUTDIR
+```{r}
+oldw <- getOption("warn")
+options( warn = -1 )
+```
+
+###### Required libraries
+```{r}
+library(Seurat) # (CRAN) main scRNA-seq analysis package
+library(future) # (CRAN) to run parallel processes
+library(STACAS) # (GitHub carmonalab/STACAS) for STACAS-based anchor detection
+#comment
+```
+
+###### User's home and stopwatch to time run
+```{r}
+UserHomeDirectory <- Sys.getenv("HOME")[[1]]
+print(UserHomeDirectory)
+
+StopWatchStart <- list()
+StopWatchEnd   <- list()
+
+StopWatchStart$Overall  <- Sys.time()
+```
+
+###### Define inputs
+```{r}
+### Run specific inputs and parameters
+
+AnchorFinder        <- "STACAS" ## Either 'STACAS' or 'SEURAT'
+
+### /path_to/*rds infiles (R objects) from CBW_CAN_2021_Module7_Lab1__QC_Normalization.R
+
+### Not including G945_I_T due to memory constrains and because it has high mito.fraction
+
+PathToDatasets <- list(
+  "G1003_A_T" = "~/CourseData/CAN_data/Module7/OUTFILES/Richards_NatCancer_2021/Richards_NatCancer_2021_G1003_A_T_QC_Normalization.rds",
+  # "G945_I_T"  = "~/CourseData/CAN_data/Module7/OUTFILES/Richards_NatCancer_2021/Richards_NatCancer_2021_G945_I_T_QC_Normalization.rds",
+  "G910_A_T"  = "~/CourseData/CAN_data/Module7/OUTFILES/Richards_NatCancer_2021/Richards_NatCancer_2021_G910_A_T_QC_Normalization.rds",
+  "G983_A_T"  = "~/CourseData/CAN_data/Module7/OUTFILES/Richards_NatCancer_2021/Richards_NatCancer_2021_G983_A_T_QC_Normalization.rds",
+  "G620_T"    = "~/CourseData/CAN_data/Module7/OUTFILES/Richards_NatCancer_2021/Richards_NatCancer_2021_G620_T_QC_Normalization.rds",
+  "G946_I_T"  = "~/CourseData/CAN_data/Module7/OUTFILES/Richards_NatCancer_2021/Richards_NatCancer_2021_G946_I_T_QC_Normalization.rds",
+  "G967_A_T"  = "~/CourseData/CAN_data/Module7/OUTFILES/Richards_NatCancer_2021/Richards_NatCancer_2021_G967_A_T_QC_Normalization.rds"
+)
+```
+
+###### Define outputs
+```{r}
+### Outputs
+PathForOutfiles     <- paste0("~/CourseData/CAN_data/Module7/OUTFILES/Richards_NatCancer_2021/", AnchorFinder, "/WITHOUT_G945_I_T") ## /path_to/out_directory
+PrefixOutfiles      <- "Richards_NatCancer_2021"  ## Prefix for outfiles
+PathForOutfiles     <- gsub("^~/",paste0(UserHomeDirectory,"/"), PathForOutfiles)
+dir.create(path = PathForOutfiles, recursive = T, showWarnings = F)
+```
+
+###### Define default parameters
+```{r}
+### Default parameters. Either suggested by Seurat developers, or tailored empirically.
+
+### NOTE: when datasets being integrated have fewer anchors than needed for the integration,
+### step IntegrateData() will produce an error:
+### `Error in nn2(data = c(15.4534704633918, 15.4534704633918, 15.4534704633918,  : 
+### Cannot find more nearest neighbours than there are points`
+### To fix this using Seurat's anchor finder in step FindIntegrationAnchors() lower the k.filter value (e.g. 150, default = 200)
+### To fix this using STACAS anchor finder, in step FilterAnchors.STACAS() increase the dist.pct and dist.thr values (e.g. 0.9, default = 0.8)
+### More info: https://github.com/satijalab/seurat/issues/2056
+DefaultParameters <- list(
+  
+  ### Parameters for dataset integration
+  IntegrationNFeatures = 3000,
+  StacasVarGenesIntegratedN = 500,
+  PcaDimsUse = c(1:20),
+  SeuratFindAnchorsKFilter = 200, #default 200
+  StacasDistPct = 0.9, #default 0.8
+  StacasDistThr = 0.9, #default 0.8
+  
+  ### ReferenceDatasets = either a <comma> delimited list of dataset ID(s) to be used as
+  ### references for anchors or 'NA' to compare all-vs-all
+  ReferenceDatasets = "NA"
+)
+```
+
+###### Report R sessionInfo
+```{r}
+OutfileRSessionInfo<-paste0(PathForOutfiles, "/", PrefixOutfiles, "_SingleCell_2_Integration_RSessionInfo.txt")
+writeLines(capture.output(sessionInfo()), OutfileRSessionInfo)
+capture.output(sessionInfo())
+```
+
+###### Define number of cores and RAM for parallelization
+```{r}
+NumbCores <- 1
+MaxGlobalVariables <- 10000
+
+### Using plan(strategy = "multisession", workers = NumbCoresToUse)
+### failed in the CBW AWS instance, with error:
+###   Failed to retrieve the result of MulticoreFuture (future_lapply-1) from the forked worker (on localhost; PID 194469).
+###   Post-mortem diagnostic: No process exists with this PID, i.e. the forked localhost worker is no longer alive.
+### This seems to be related to not having enough RAM in the AWS instance allocated for the course
+### To fix this for the CBW CAN, we are:
+###   a) removing from the analysis a dataset (G945_I_T) with high mito.fraction
+###   b) Using `plan(strategy = "sequential")` in script CBW_CAN_SingleCell_2_Integration.R (i.e. no parallelization)
+### 
+### Notes: `options(future.globals.maxSize = MaxGlobalVariables)` sets the maximum allowed size in bytes.
+###         To set it to 10GB, you would run options(future.globals.maxSize = 10000 * 1024^2).
+###         Increasing the value of future.globals.maxSize will increase your RAM usage so set this number mindfully.
+###         https://satijalab.org/seurat/archive/v3.1/future_vignette.html
+###         https://github.com/satijalab/seurat/issues/3249
+
+if (regexpr("^MAX$", NumbCores, ignore.case = T)[1] == 1) {
+  NumbCoresToUse <- availableCores()[[1]]
+}else if (regexpr("^[0-9]+$", NumbCores, ignore.case = T)[1] == 1) {
+  NumbCoresToUse <- as.numeric(NumbCores)
+}else{
+  stop(paste0("Unexpected format for NumbCores: ", NumbCores, "\n"))
+}
+
+if (NumbCoresToUse == 1) {
+  plan(strategy = "sequential")
+  writeLines(paste0("\n", "*** Running: in 'sequential' mode with ", NumbCoresToUse, " core ***", "\n"))
+}else if (NumbCoresToUse > 1) {
+  # plan(strategy = "multicore", workers = NumbCoresToUse)
+  plan(strategy = "multisession", workers = NumbCoresToUse)
+  writeLines(paste0("\n", "*** Running: in 'multicore' mode with ", NumbCoresToUse, " cores ***", "\n"))
+}else{
+  stop(paste0("Unexpected NumbCores = ", NumbCoresToUse))
+}
+
+options(future.globals.maxSize = MaxGlobalVariables * 1024^2)
+```
+
+### LOAD R OBJECTS
+```{r}
+####################################
+### Load R Objects
+####################################
+InputsTable <- data.frame(matrix(unlist(PathToDatasets), nrow=length(PathToDatasets), byrow=TRUE))
+rownames(InputsTable) <- names(PathToDatasets)
+colnames(InputsTable)<-c("PathToRObject")
+NumberOfDatasets <- nrow(InputsTable)
+
+seurat.object.list <- list()
+for (dataset in rownames(InputsTable)) {
+  print(dataset)
+  DatasetIndexInInputsTable <- which(x = rownames(InputsTable) == dataset)
+  InputRobject <- InputsTable[dataset,"PathToRObject"]
+  seurat.object.list[[DatasetIndexInInputsTable]] <- readRDS(InputRobject)
+}
+```
+
+### INTEGRATE DATASETS
+```{r, warning = F, message = T}
+####################################
+### Get reference datasets
+####################################
+if (regexpr("^NA$", DefaultParameters$ReferenceDatasets , ignore.case = T)[1] == 1) {
+  ReferenceDatasets.indices <- c(1:nrow(InputsTable))
+  print("Will run all pairwise dataset comparisons")
+}else{
+  ReferenceDatasets.list <- unlist(strsplit(DefaultParameters$ReferenceDatasets, ","))
+  NumberOfFoundReferenceDatasetIDs <- sum(ReferenceDatasets.list %in% rownames(InputsTable) == T)
+  if (NumberOfFoundReferenceDatasetIDs == length(ReferenceDatasets.list)) {
+    ReferenceDatasets.indices <- match(ReferenceDatasets.list, rownames(InputsTable))
+  }else{
+    stop(paste0("Requested ", length(ReferenceDatasets.list), " datasets as references, but found ", NumberOfFoundReferenceDatasetIDs))
+  }
+  print(paste0("Will use datasets: ", paste(as.character(ReferenceDatasets.indices), sep = "", collapse = ",")))
+}
+
+####################################
+### Get integration anchors
+####################################
+if (regexpr("^STACAS$", AnchorFinder, ignore.case = T)[1] == 1) {
+  
+  ####################################
+  ### Get anchors with STACAS
+  ####################################
+  print("Get integration anchors with STACAS")
+  seurat.object.anchors.unfiltered <- FindAnchors.STACAS(object.list = seurat.object.list, dims=DefaultParameters$PcaDimsUse,
+                                                         anchor.features=DefaultParameters$StacasVarGenesIntegratedN, reference = ReferenceDatasets.indices, verbose = F)
+  seurat.object.anchors <- FilterAnchors.STACAS(seurat.object.anchors.unfiltered, dist.thr = DefaultParameters$StacasDistPct, DefaultParameters$StacasDistThr)
+  SampleTree <- SampleTree.STACAS(seurat.object.anchors)
+
+} else if (regexpr("^Seurat$", AnchorFinder , ignore.case = T)[1] == 1) {
+  
+  ####################################
+  ### Get anchors with Seurat
+  ####################################
+  print("Get integration anchors with SEURAT")
+  seurat.object.integratedfeatures <- SelectIntegrationFeatures(object.list = seurat.object.list, nfeatures = DefaultParameters$IntegrationNFeatures, verbose = F)
+  seurat.object.list <- PrepSCTIntegration(object.list = seurat.object.list, anchor.features = seurat.object.integratedfeatures, verbose = F)
+  seurat.object.anchors <- FindIntegrationAnchors(object.list = seurat.object.list, k.filter = DefaultParameters$SeuratFindAnchorsKFilter, normalization.method = "SCT",
+                                                  dims=DefaultParameters$PcaDimsUse, anchor.features = seurat.object.integratedfeatures, reference = ReferenceDatasets.indices,
+                                                  verbose = F)
+  SampleTree <- NULL
+  
+} else {
+  stop("ERROR: unexpected anchors function")
+}
+
+print(seurat.object.anchors)
+```
+
+### INTEGRATE DATASETS
+```{r, warning = F, message = T}
+####################################
+### Integrate datasets
+####################################
+seurat.object.integrated <- IntegrateData(anchorset = seurat.object.anchors, normalization.method = "SCT", sample.tree = SampleTree, preserve.order = T, verbose = T)
+print(seurat.object.integrated)
+```
+
+### SAVE INTEGRATED R_OBJECT
+```{r}
+####################################
+### Saving integrated R object
+####################################
+OutfileRDS<-paste0(PathForOutfiles, "/", PrefixOutfiles, "_Integration.rds")
+saveRDS(seurat.object.integrated, file = OutfileRDS)
+```
+
+### OBTAIN COMPUTING TIME
+```{r}
+####################################
+### Obtain computing time used
+####################################
+StopWatchEnd$Overall  <- Sys.time()
+
+OutfileCPUtimes<-paste0(PathForOutfiles, "/", PrefixOutfiles, "_Integration_CPUtimes.txt")
+
+write(file = OutfileCPUtimes, x = paste("#Number_of_cores_used", NumbCoresToUse, sep = "\t", collapse = ""))
+write(file = OutfileCPUtimes, x = paste("#MaxGlobalVariables", MaxGlobalVariables, sep = "\t", collapse = ""), append = T)
+
+Headers<-paste("Step", "Time(minutes)", sep="\t")
+write.table(Headers, file = OutfileCPUtimes, row.names = F, col.names = F, sep="\t", quote = F, append = T)
+
+lapply(names(StopWatchStart), function(stepToClock) {
+  if (regexpr("POSIXct", class(StopWatchStart[[stepToClock]]), ignore.case = T)[1] == 1) {
+    TimeStart <- StopWatchStart[[stepToClock]]
+    TimeEnd   <- StopWatchEnd[[stepToClock]]
+    TimeDiff <- format(difftime(TimeEnd, TimeStart, units = "min"))
+    ReportTime<-c(paste(stepToClock, TimeDiff, sep = "\t", collapse = ""))
+    write(file = OutfileCPUtimes, x=gsub(pattern = " mins", replacement = "", x = ReportTime), append = T)
+  }
+})
+```
+
+### FINISH
+```{r}
+####################################
+### Finish
+####################################
+options(warn = oldw)
+writeLines(paste0("\nEND - Check:\n", PathForOutfiles, "\nFor outfiles\n\n"))
+# quit()
+```
