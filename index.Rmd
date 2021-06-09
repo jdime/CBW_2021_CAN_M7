@@ -4,5 +4,3 @@ author: "J. Javier Diaz-Mejia"
 date: "`r Sys.Date()`"
 site: bookdown::bookdown_site
 ---
-
-
