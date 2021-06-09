@@ -16,3 +16,21 @@ For this module, we use seven glioblastoma scRNA-seq samples from [Richards et a
 Raw scRNA-seq measurements are provided in MTX format, metadata, and code needed for this tutorial can be obtained from Zenodo:
 https://zenodo.org/record/4913828#.YMAr3TZKjUI
 
+### How to run scripts
+
+*Scripts for Labs 1 to 4 are provide in two versions, pick the version that you feel more comfortable with:*<br />
+a) \*Rmd files can be rendered using Rstudio<br />
+b) R_PROGRAMS/\*R files can be run in a console/terminal like:<br />
+`Rscript ~/path_to/CBW_CAN_2021_Module7_Lab1_QC_Normalization.R`<br />
+`Rscript ~/path_to/CBW_CAN_2021_Module7_Lab2_Integration.R`<br />
+`Rscript ~/path_to/CBW_CAN_2021_Module7_Lab3_PCA_Clustering_DimReduction.R`<br />
+`Rscript ~/path_to/CBW_CAN_2021_Module7_Lab4_DGE.R`<br />
+
+*Scripts for Labs 5 and 6 must be run in a console/terminal using one-line-commands, like:*<br />
+`Rscript /path_to/CBW_CAN_SingleCell_5_GSVA.R -i /path_to/Richards_NatCancer_2021_AverageGeneExpression_GlobalClustering.tsv.bz2 -t DGE -c /path_to/LM22_signature.cutoff3000.UsedF1000paper.renamed.gmt -o /path_to/WITHOUT_G945_I_T -p Richards_NatCancer_2021_AverageGeneExpression_GlobalClustering -e 0.05 -f 0.1`<br />
+
+`Rscript /path_to/CBW_CAN_SingleCell_6_InferCNV.R -i /path_to/ -t MTX -j /path_to/Richards_NatCancer_2021_GlobalClustering_CellClusters_G983_A_T.tsv.bz2 -k 4 -g /path_to/gencode_v19_gene_pos.txt -m 0.1 -n 0.1 -s 0.15 -o /path_to/ -p Richards_NatCancer_2021_GlobalClustering_CellClusters_G983_A_T -u MAX -l N -a 10000`<br />
+<br />
+*For help with Labs 5 and 6 scripts use:*<br />
+`Rscript /path_to/CBW_CAN_SingleCell_5_GSVA.R -h`<br />
+`Rscript /path_to/CBW_CAN_SingleCell_6_InferCNV.R -h`<br />
